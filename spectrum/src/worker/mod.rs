@@ -42,6 +42,9 @@ mod audit_registry;
 mod client_registry;
 mod service_registry;
 
+#[cfg(test)]
+mod tests;
+
 use audit_registry::AuditRegistry;
 use client_registry::Registry as ClientRegistry;
 use service_registry::{Registry as ServiceRegistry, SharedClient};
@@ -147,16 +150,20 @@ where
             .await
             .unwrap();
         if !verify {
-            warn!("Didn't verify");
-            // TODO: fix serialization bugs
-            // return None;
+            warn!("Didn't verify, neutral share will be used for this client.");
         }
 
         let protocol = self.protocol.clone();
         let token = state.write_token;
-        let accumulator = spawn_blocking(move || protocol.to_accumulator(token))
-            .await
-            .expect("Accepting write token should never fail.");
+        let accumulator = spawn_blocking(move || {
+            if verify {
+                protocol.to_accumulator(token)
+            } else {
+                protocol.new_accumulator()
+            }
+        })
+        .await
+        .expect("Accepting write token should never fail.");
 
         if accumulator.len() != self.protocol.num_channels() {
             return Err(Error::new(&format!(
