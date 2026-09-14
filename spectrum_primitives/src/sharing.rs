@@ -77,13 +77,13 @@ mod transpose_tests {
     #[test]
     fn test_transpose_empty() {
         let zero_by_n: Vec<Vec<u8>> = vec![];
-        assert_eq!(transpose(zero_by_n), vec![]: Vec::<Vec<u8>>);
+        assert_eq!(transpose(zero_by_n), Vec::<Vec<u8>>::new());
 
         let one_by_zero: Vec<Vec<u8>> = vec![vec![]];
-        assert_eq!(transpose(one_by_zero), vec![vec![]]: Vec<Vec<u8>>);
+        assert_eq!(transpose(one_by_zero), vec![Vec::<u8>::new()]);
 
         let n_by_zero: Vec<Vec<u8>> = vec![vec![], vec![]];
-        assert_eq!(transpose(n_by_zero), vec![vec![]]: Vec<Vec<u8>>);
+        assert_eq!(transpose(n_by_zero), vec![Vec::<u8>::new()]);
     }
 
     proptest! {
