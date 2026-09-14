@@ -176,13 +176,13 @@ macro_rules! check_protocol {
                     for (msg_idx, actual_msg) in recovered_msgs.into_iter().enumerate() {
                         if msg_idx == key_idx {
                             prop_assert_eq!(
-                                actual_msg.into(): <$type as Protocol>::Accumulator,
+                                Into::<<$type as Protocol>::Accumulator>::into(actual_msg),
                                 msg.clone(),
                                 "Channel was incorrect"
                             );
                         } else {
                             prop_assert_eq!(
-                                actual_msg.into(): <$type as Protocol>::Accumulator,
+                                Into::<<$type as Protocol>::Accumulator>::into(actual_msg),
                                 <$type as Protocol>::Accumulator::empty(protocol.message_len().into()),
                                 "Channel was non-null"
                             )
