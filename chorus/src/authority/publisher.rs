@@ -1,9 +1,6 @@
 use spectrum::{
-    config::Store,
-    net::Config as NetConfig,
-    protocols::wrapper::ProtocolWrapper,
-    publisher::NoopRemote,
-    services::PublisherInfo,
+    config::Store, net::Config as NetConfig, protocols::wrapper::ProtocolWrapper,
+    publisher::NoopRemote, services::PublisherInfo,
 };
 use std::future::Future;
 

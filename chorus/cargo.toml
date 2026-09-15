@@ -5,4 +5,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
+clap = { version = "3.0.0-beta.5", features = ["derive", "env", "cargo"] }
 spectrum = { path = "../spectrum" }
+tokio = {
+    version = "1.1.0",
+    features = ["macros", "signal", "sync", "rt-multi-thread"]
+}
