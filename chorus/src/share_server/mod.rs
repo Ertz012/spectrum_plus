@@ -88,13 +88,13 @@ mod tests {
         assert_eq!(ShareServerId::A.spectrum_group().idx, 0);
         assert_eq!(ShareServerId::B.spectrum_group().idx, 1);
     }
-}
-
-#[test]
-fn share_server_id_can_be_parsed() {
-    assert_eq!("a".parse(), Ok(ShareServerId::A));
-    assert_eq!("A".parse(), Ok(ShareServerId::A));
-    assert_eq!("b".parse(), Ok(ShareServerId::B));
-    assert_eq!("B".parse(), Ok(ShareServerId::B));
-    assert!("c".parse::<ShareServerId>().is_err());
+    
+    #[test]
+    fn share_server_id_can_be_parsed() {
+        assert_eq!("a".parse(), Ok(ShareServerId::A));
+        assert_eq!("A".parse(), Ok(ShareServerId::A));
+        assert_eq!("b".parse(), Ok(ShareServerId::B));
+        assert_eq!("B".parse(), Ok(ShareServerId::B));
+        assert!("c".parse::<ShareServerId>().is_err());
+    }
 }
