@@ -16,7 +16,7 @@ use crate::{
 };
 use crate::{
     proto::{
-        self, expect_field,
+        self, expect_field, validate_round,
         worker_server::{Worker, WorkerServer},
         AggregateWorkerRequest, RegisterClientRequest, RegisterClientResponse, Share,
         UploadRequest, UploadResponse, VerifyRequest, VerifyResponse,
@@ -49,6 +49,9 @@ use audit_registry::AuditRegistry;
 use client_registry::Registry as ClientRegistry;
 use service_registry::{Registry as ServiceRegistry, SharedClient};
 
+const LEGACY_WINDOW: u64 = 1;
+const LEGACY_ROUND: u32 = 1;
+
 type Error = crate::config::store::Error;
 type BoxedError = Box<dyn std::error::Error + Sync + Send>;
 
@@ -61,6 +64,8 @@ struct WorkerState<P: Protocol> {
     experiment: Experiment,
     client_registry: ClientRegistry,
     protocol: P,
+    window: u64,
+    round: u32,
 }
 
 impl<P> WorkerState<P>
@@ -68,7 +73,7 @@ where
     P: Protocol,
     P::Accumulator: Clone,
 {
-    fn from_experiment(experiment: Experiment, protocol: P) -> Self {
+    fn from_experiment(experiment: Experiment, protocol: P, window: u64, round: u32) -> Self {
         WorkerState {
             audit_registry: Mutex::new(AuditRegistry::new(
                 experiment.clients(),
@@ -78,6 +83,8 @@ where
             experiment,
             client_registry: ClientRegistry::new(),
             protocol,
+            window,
+            round,
         }
     }
 
@@ -128,10 +135,20 @@ where
     async fn verify(
         &self,
         client: &ClientInfo,
+        worker: WorkerInfo,
         share: P::AuditShare,
     ) -> Result<VerifyStatus<P>, Error> {
         trace!("verify() task for client_info: {:?}", client);
-        let check_count = self.audit_registry.lock().await.add(client, share).await;
+        let check_count = match self
+            .audit_registry
+            .lock()
+            .await
+            .add(client, worker, share)
+            .await
+        {
+            Some(count) => count,
+            None => return Ok(VerifyStatus::AwaitingShares),
+        };
         trace!(
             "{}/{} shares received for {:?}",
             check_count,
@@ -199,6 +216,7 @@ where
 }
 
 pub struct MyWorker<P: Protocol> {
+    info: WorkerInfo,
     start_rx: watch::Receiver<Option<Instant>>,
     start_time: Arc<RwLock<Option<Instant>>>,
     services: Arc<ServiceRegistry>,
@@ -212,13 +230,17 @@ where
     P::Accumulator: Clone,
 {
     fn new(
+        info: WorkerInfo,
         start_rx: watch::Receiver<Option<Instant>>,
         services: Arc<ServiceRegistry>,
         experiment: Experiment,
         protocol: P,
+        window: u64,
+        round: u32,
     ) -> Self {
-        let state = WorkerState::from_experiment(experiment, protocol);
+        let state = WorkerState::from_experiment(experiment, protocol, window, round);
         MyWorker {
+            info,
             start_rx,
             start_time: Default::default(),
             services,
@@ -285,12 +307,22 @@ where
     ) -> Result<Response<UploadResponse>, Status> {
         let request = request.into_inner();
 
+        validate_round(
+            request.window,
+            request.round,
+            self.state.window,
+            self.state.round,
+        )?;
+
         let client_id = expect_field(request.client_id, "Client ID")?;
         let client_info = ClientInfo::from(&client_id);
         trace!("upload() client_info: {:?}", &client_info);
         let write_token = expect_field(request.write_token, "Write Token")?;
         debug!("upload() write token: {:?}", &client_info);
         let state = self.state.clone();
+        let worker_id: proto::WorkerId = self.info.into();
+        let window = self.state.window;
+        let round = self.state.round;
         let peers: Vec<SharedClient> = self.get_peers(&client_info).await?;
 
         spawn(async move {
@@ -302,6 +334,9 @@ where
                 let req = Request::new(VerifyRequest {
                     client_id: Some(client_id.clone()),
                     audit_share: Some(audit_share.into()),
+                    window,
+                    round,
+                    worker_id: Some(worker_id.clone()),
                 });
                 spawn(async move {
                     peer.lock().await.verify(req).await.unwrap();
@@ -324,11 +359,32 @@ where
     ) -> Result<Response<VerifyResponse>, Status> {
         let request = request.into_inner();
 
-        // TODO(zjn): check which worker this comes from, don't double-insert
+        validate_round(
+            request.window,
+            request.round,
+            self.state.window,
+            self.state.round,
+        )?;
+
         let client_info = ClientInfo::from(&expect_field(request.client_id, "Client ID")?);
+        let worker_info = WorkerInfo::from(expect_field(request.worker_id, "Worker ID")?);
+        if !self
+            .state
+            .client_registry
+            .get_peers(&client_info)
+            .await?
+            .contains(&worker_info)
+        {
+            return Err(Status::permission_denied(
+                "Worker is not registered for this client.",
+            ));
+        }
         let share = expect_field(request.audit_share, "Audit Share")?;
         let share = share.try_into().unwrap();
         let state = self.state.clone();
+        let window = self.state.window;
+        let round = self.state.round;
+        let own_worker_id: proto::WorkerId = self.info.into();
         let start_time = self.get_start_time().await;
         let leader;
         let notify;
@@ -341,7 +397,7 @@ where
         }
 
         spawn(async move {
-            match state.verify(&client_info, share).await {
+            match state.verify(&client_info, worker_info, share).await {
                 Ok(VerifyStatus::AllClientsVerified { accumulator }) => {
                     if let Some(n) = notify {
                         n.notify_one()
@@ -351,6 +407,9 @@ where
                     info!("Forwarding to leader.");
                     let req = Request::new(AggregateWorkerRequest {
                         share: Some(Share { data: accumulator }),
+                        window,
+                        round,
+                        worker_id: Some(own_worker_id),
                     });
                     leader
                         .expect("leader should be Some() when not in hammer mode")
@@ -409,6 +468,8 @@ async fn inner_run<C, F, P>(
     experiment: Experiment,
     protocol: P,
     info: WorkerInfo,
+    window: u64,
+    round: u32,
     net: NetConfig,
     shutdown: F,
 ) -> Result<(), BoxedError>
@@ -430,7 +491,15 @@ where
     let (registry, registry_remote) = ServiceRegistry::new_with_remote();
     let registry = Arc::new(registry);
 
-    let worker = MyWorker::new(start_rx, registry.clone(), experiment, protocol);
+    let worker = MyWorker::new(
+        info,
+        start_rx,
+        registry.clone(),
+        experiment,
+        protocol,
+        window,
+        round,
+    );
     let state = worker.state.clone();
     let mut builder = tonic::transport::server::Server::builder();
     if let Some(identity) = net.tls_ident() {
@@ -464,6 +533,9 @@ where
                 accumulator.into_iter().map(Into::<Vec<u8>>::into).collect();
             let req = Request::new(AggregateWorkerRequest {
                 share: Some(Share { data: accumulator }),
+                window: state.window,
+                round: state.round,
+                worker_id: Some(info.into()),
             });
             leader.lock().await.aggregate_worker(req).await.unwrap();
         })
@@ -488,17 +560,55 @@ where
     C: Store,
     F: Future<Output = ()> + Send + 'static,
 {
+    run_for_round(
+        config,
+        experiment,
+        protocol,
+        info,
+        LEGACY_WINDOW,
+        LEGACY_ROUND,
+        net,
+        shutdown,
+    )
+    .await
+}
+
+pub async fn run_for_round<C, F>(
+    config: C,
+    experiment: Experiment,
+    protocol: ProtocolWrapper,
+    info: WorkerInfo,
+    window: u64,
+    round: u32,
+    net: NetConfig,
+    shutdown: F,
+) -> Result<(), BoxedError>
+where
+    C: Store,
+    F: Future<Output = ()> + Send + 'static,
+{
     debug!("auth keys: {:?}", experiment.get_keys());
+
     match protocol {
         ProtocolWrapper::Secure(protocol) => {
-            inner_run(config, experiment, protocol, info, net, shutdown).await?;
+            inner_run(
+                config, experiment, protocol, info, window, round, net, shutdown,
+            )
+            .await?;
         }
         ProtocolWrapper::SecurePub(protocol) => {
-            inner_run(config, experiment, protocol, info, net, shutdown).await?;
+            inner_run(
+                config, experiment, protocol, info, window, round, net, shutdown,
+            )
+            .await?;
         }
         ProtocolWrapper::SecureMultiKey(protocol) => {
-            inner_run(config, experiment, protocol, info, net, shutdown).await?;
+            inner_run(
+                config, experiment, protocol, info, window, round, net, shutdown,
+            )
+            .await?;
         }
     }
+
     Ok(())
 }

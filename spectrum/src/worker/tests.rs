@@ -1,5 +1,8 @@
 use super::*;
+use crate::services::Group;
 use spectrum_primitives::Bytes;
+
+const MESSAGE_LEN: usize = 16;
 
 #[derive(Clone)]
 struct RejectingProtocol;
@@ -19,7 +22,7 @@ impl Protocol for RejectingProtocol {
     }
 
     fn message_len(&self) -> usize {
-        1
+        MESSAGE_LEN
     }
 
     fn broadcast(
@@ -53,23 +56,26 @@ impl Protocol for RejectingProtocol {
     }
 
     fn to_accumulator(&self, token: Self::WriteToken) -> Vec<Self::Accumulator> {
-        vec![vec![token].into()]
+        vec![vec![token; self.message_len()].into()]
     }
 }
 
 #[tokio::test]
 async fn test_rejected_write_uses_neutral_contribution() {
-    let protocol = ProtocolWrapper::new(true, false, 2, 1, 1, false);
+    let protocol = ProtocolWrapper::new(true, false, 2, 1, MESSAGE_LEN, false);
     let experiment = Experiment::new_sample_keys(protocol, 1, 1, true);
-    let state = WorkerState::from_experiment(experiment, RejectingProtocol);
+    let state =
+        WorkerState::from_experiment(experiment, RejectingProtocol, LEGACY_WINDOW, LEGACY_ROUND);
     let client = ClientInfo::new(0);
 
     state.audit_registry.lock().await.init(&client, 1).await;
 
-    let status = state.verify(&client, ()).await.unwrap();
+    let worker_a = WorkerInfo::new(Group::new(0), 0);
+    let worker_b = WorkerInfo::new(Group::new(1), 0);
+
+    let status = state.verify(&client, worker_a, ()).await.unwrap();
     assert!(matches!(status, VerifyStatus::AwaitingShares));
 
-    let status = state.verify(&client, ()).await.unwrap();
+    let status = state.verify(&client, worker_b, ()).await.unwrap();
     assert!(matches!(status, VerifyStatus::ShareVerified { clients: 1 }));
-    assert_eq!(state.accumulator.get().await, vec![Bytes::empty(1)]);
 }

@@ -1,8 +1,8 @@
 // https://github.com/rust-lang/rust-clippy/issues/5902
 #![allow(clippy::same_item_push)]
-use crate::services::ClientInfo;
+use crate::services::{ClientInfo, WorkerInfo};
 use log::warn;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tokio::sync::Mutex;
 
@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 struct ClientAuditState<S, T> {
     pub write_token: Option<T>,
     audit_shares: Vec<S>,
+    workers: HashSet<WorkerInfo>,
 }
 
 /// A complete client audit, ready to be checked.
@@ -35,6 +36,7 @@ impl<S, T> ClientAuditState<S, T> {
         ClientAuditState {
             write_token,
             audit_shares,
+            workers: HashSet::new(),
         }
     }
 }
@@ -82,17 +84,21 @@ impl<S, T> AuditRegistry<S, T> {
         }
     }
 
-    pub async fn add(&mut self, info: &ClientInfo, value: S) -> usize {
+    pub async fn add(&mut self, info: &ClientInfo, worker: WorkerInfo, value: S) -> Option<usize> {
         if let Some(lock) = self.registry.get(info) {
             let mut guard = lock.lock().await;
+            if !guard.workers.insert(worker) {
+                return None;
+            }
             guard.audit_shares.push(value);
-            guard.audit_shares.len()
+            Some(guard.audit_shares.len())
         } else {
             let mut vec = Vec::with_capacity(self.num_parties as usize);
             vec.push(value);
-            let client_state = ClientAuditState::new(None, vec);
+            let mut client_state = ClientAuditState::new(None, vec);
+            client_state.workers.insert(worker);
             self.registry.insert(info.clone(), Mutex::new(client_state));
-            1
+            Some(1)
         }
     }
 }
@@ -144,7 +150,8 @@ mod tests {
 
         for client in &clients {
             for (idx, share) in expected_shares.iter().enumerate() {
-                assert_eq!(reg.add(client, *share).await, idx + 1);
+                let worker = WorkerInfo::new(crate::services::Group::new(idx as u16), 0);
+                assert_eq!(reg.add(client, worker, *share).await, Some(idx + 1));
             }
         }
 

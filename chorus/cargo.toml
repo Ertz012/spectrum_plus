@@ -11,3 +11,5 @@ tokio = {
     version = "1.1.0",
     features = ["macros", "signal", "sync", "rt-multi-thread"]
 }
+tonic = "0.4"
+ed25519-dalek = "3"

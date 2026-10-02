@@ -1,3 +1,4 @@
+use crate::MainRoundContext;
 use spectrum::{
     config::Store,
     experiment::Experiment,
@@ -41,6 +42,7 @@ impl ShareServerId {
 /// ShareServer A is group 0 and ShareServer B is group 1.
 pub async fn run_development<C, WF, LF>(
     id: ShareServerId,
+    expected_round: MainRoundContext,
     config: C,
     experiment: Experiment,
     worker_net: NetConfig,
@@ -53,23 +55,29 @@ where
     WF: Future<Output = ()> + Send + 'static,
     LF: Future<Output = ()> + Send + 'static,
 {
+    let window = expected_round.window().get();
+    let round = expected_round.round().get();
     let group = id.spectrum_group();
     let protocol = experiment.get_protocol().clone();
 
-    let worker = worker::run(
+    let worker = worker::run_for_round(
         config.clone(),
         experiment.clone(),
         protocol.clone(),
         WorkerInfo::new(group, 0),
+        window,
+        round,
         worker_net,
         worker_shutdown,
     );
 
-    let leader = leader::run(
+    let leader = leader::run_for_round(
         config,
         experiment,
         protocol,
         LeaderInfo::new(group),
+        window,
+        round,
         leader_net,
         leader_shutdown,
     );
@@ -88,7 +96,7 @@ mod tests {
         assert_eq!(ShareServerId::A.spectrum_group().idx, 0);
         assert_eq!(ShareServerId::B.spectrum_group().idx, 1);
     }
-    
+
     #[test]
     fn share_server_id_can_be_parsed() {
         assert_eq!("a".parse(), Ok(ShareServerId::A));

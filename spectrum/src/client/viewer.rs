@@ -24,12 +24,17 @@ use std::{
     time::Instant,
 };
 
+const LEGACY_WINDOW: u64 = 1;
+const LEGACY_ROUND: u32 = 1;
+
 type TokioError = Box<dyn std::error::Error + Sync + Send>;
 
 async fn inner_run<C, F, P>(
     config: C,
     protocol: P,
     info: ClientInfo,
+    window: u64,
+    round: u32,
     hammer: bool,
     cert: Option<Certificate>,
     max_jitter: u64,
@@ -87,6 +92,8 @@ where
                 .map(|(mut client, write_token)| {
                     let client_id = client_id.clone();
                     let write_token = write_token.into();
+                    let window = window;
+                    let round = round;
                     tokio::spawn(async move {
                         let response;
                         let start_time = Instant::now();
@@ -94,6 +101,8 @@ where
                             let req = tonic::Request::new(UploadRequest {
                                 client_id: Some(client_id.clone()),
                                 write_token: Some(write_token.clone()),
+                                window,
+                                round,
                             });
                             trace!("About to send upload request.");
                             {
@@ -141,15 +150,53 @@ where
     C: Store,
     F: Future<Output = ()> + Send + 'static,
 {
+    run_for_round(
+        config,
+        protocol,
+        info,
+        LEGACY_WINDOW,
+        LEGACY_ROUND,
+        hammer,
+        cert,
+        max_jitter,
+        shutdown,
+    )
+    .await
+}
+
+pub async fn run_for_round<C, F>(
+    config: C,
+    protocol: ProtocolWrapper,
+    info: ClientInfo,
+    window: u64,
+    round: u32,
+    hammer: bool,
+    cert: Option<Certificate>,
+    max_jitter: u64,
+    shutdown: F,
+) -> Result<(), TokioError>
+where
+    C: Store,
+    F: Future<Output = ()> + Send + 'static,
+{
     match protocol {
         ProtocolWrapper::Secure(protocol) => {
-            inner_run(config, protocol, info, hammer, cert, max_jitter, shutdown).await?;
+            inner_run(
+                config, protocol, info, window, round, hammer, cert, max_jitter, shutdown,
+            )
+            .await?;
         }
         ProtocolWrapper::SecurePub(protocol) => {
-            inner_run(config, protocol, info, hammer, cert, max_jitter, shutdown).await?;
+            inner_run(
+                config, protocol, info, window, round, hammer, cert, max_jitter, shutdown,
+            )
+            .await?;
         }
         ProtocolWrapper::SecureMultiKey(protocol) => {
-            inner_run(config, protocol, info, hammer, cert, max_jitter, shutdown).await?;
+            inner_run(
+                config, protocol, info, window, round, hammer, cert, max_jitter, shutdown,
+            )
+            .await?;
         }
     }
     Ok(())

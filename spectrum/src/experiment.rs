@@ -172,97 +172,33 @@ pub mod tests {
     use core::ops::Range;
     use futures::executor::block_on;
     use proptest::prelude::*;
+    use spectrum_primitives::AuthKey;
 
-    // TODO: restore
-    // impl Arbitrary for Experiment {
-    //     type Parameters = bool;
-    //     type Strategy = BoxedStrategy<Self>;
+    impl Arbitrary for Experiment {
+        type Parameters = bool;
+        type Strategy = BoxedStrategy<Self>;
 
-    //     fn arbitrary_with(hammer: bool) -> Self::Strategy {
-    //         let group_size: Range<u16> = 1..10;
-    //         // TODO(zjn): add SecureProtocols too (maybe via impl arbitrary for ProtocolWrapper?)
-    //         let protocols = any::<insecure::InsecureProtocol>().prop_map(ProtocolWrapper::from);
-    //         (protocols, group_size)
-    //             .prop_flat_map(move |(protocol, group_size)| {
-    //                 let clients: Range<u128> = (protocol.num_channels() as u128)..20;
-    //                 let keys =
-    //                     prop::collection::vec(any::<ChannelKeyWrapper>(), protocol.num_channels());
-    //                 (clients, keys).prop_map(move |(clients, keys)| {
-    //                     Experiment::new(protocol.clone(), group_size, clients, hammer, keys)
-    //                 })
-    //             })
-    //             .boxed()
-    //     }
-    // }
+        fn arbitrary_with(hammer: bool) -> Self::Strategy {
+            let group_sizes: Range<u16> = 1..10;
+            let channel_counts: Range<usize> = 1..10;
+            let message_lengths: Range<usize> = 16..100;
 
-    // proptest! {
-    //     #[test]
-    //     fn test_experiment_roundtrip(config in inmem_stores(), experiment: Experiment) {
-    //         block_on(async {
-    //             write_to_store(&config, &experiment).await.unwrap();
-    //             assert_eq!(
-    //                 read_from_store(&config).await.unwrap(),
-    //                 experiment);
-    //         });
-    //     }
+            (group_sizes, channel_counts, message_lengths)
+                .prop_flat_map(move |(group_size, channels, message_len)| {
+                    let protocol =
+                        ProtocolWrapper::new(true, false, 2, channels, message_len, false);
 
-    //     #[test]
-    //     fn test_experiment_iter_services(experiment: Experiment) {
-    //         let services: Vec<Service> = experiment.iter_services().collect();
+                    let clients = channels as u128..20;
+                    let keys = prop::collection::vec(any::<AuthKey>(), channels);
 
-    //         let mut publishers = vec![];
-    //         let mut leaders = vec![];
-    //         let mut workers = vec![];
-    //         for service in services {
-    //             match service {
-    //                 Service::Publisher(_) => { publishers.push(service) },
-    //                 Service::Leader(_) => { leaders.push(service) },
-    //                 Service::Worker(_) => { workers.push(service) },
-    //                 Service::Client(_) => {
-    //                     panic!("Clients not (yet) in iter_services");
-    //                 }
-    //             }
-    //         }
-    //         let actual = (publishers.len(), leaders.len(), workers.len());
-    //         let expected = (1,
-    //                         experiment.groups() as usize,
-    //                         (experiment.groups() * experiment.group_size()) as usize);
-    //         prop_assert_eq!(actual, expected);
-    //     }
+                    (Just(protocol), Just(group_size), clients, keys)
+                })
+                .prop_map(move |(protocol, group_size, clients, keys)| {
+                    let keys = keys.into_iter().map(ChannelKeyWrapper::from).collect();
 
-    //     #[test]
-    //     fn test_experiment_iter_services_hammer(experiment in Experiment::arbitrary_with(true)) {
-    //         let services: Vec<Service> = experiment.iter_services().collect();
-
-    //         let mut publishers = vec![];
-    //         let mut workers = vec![];
-    //         for service in services {
-    //             match service {
-    //                 Service::Publisher(_) => { publishers.push(service) },
-    //                 Service::Leader(_) => { return Err(TestCaseError::fail("Didn't expect leaders in hammer mode")); },
-    //                 Service::Worker(_) => { workers.push(service) },
-    //                 Service::Client(_) => {
-    //                     panic!("Clients not (yet) in iter_services");
-    //                 }
-    //             }
-    //         }
-    //         let expected_workers = (experiment.groups() * experiment.group_size()) as usize;
-    //         prop_assert_eq!(workers.len(), expected_workers);
-    //         prop_assert_eq!(publishers.len(), 1);
-    //     }
-
-    //     #[test]
-    //     fn test_experiment_iter_clients(experiment: Experiment) {
-    //         let clients: Vec<Service> = experiment.iter_clients().collect();
-
-    //         for client in &clients {
-    //             match client {
-    //                 Service::Client(_) => {}
-    //                 _ => { panic!("Only clients expected in iter_clients()."); }
-    //             }
-    //         }
-
-    //         prop_assert_eq!(clients.len(), experiment.clients() as usize);
-    //     }
-    // }
+                    Experiment::new(protocol, group_size, clients, hammer, keys)
+                })
+                .boxed()
+        }
+    }
 }

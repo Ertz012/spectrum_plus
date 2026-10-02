@@ -43,6 +43,37 @@ pub mod proto {
     pub fn expect_field<T>(opt: Option<T>, name: &str) -> Result<T, Status> {
         opt.ok_or_else(|| Status::invalid_argument(format!("{} must be set.", name)))
     }
+
+    pub(crate) fn validate_round(
+        received_window: u64,
+        received_round: u32,
+        expected_window: u64,
+        expected_round: u32,
+    ) -> Result<(), Status> {
+        if received_window != expected_window || received_round != expected_round {
+            return Err(Status::failed_precondition(format!(
+                "Message belongs to window {}, round {}; expected window {}, round {}",
+                received_window, received_round, expected_window, expected_round
+            )));
+        }
+
+        Ok(())
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn round_validation_requires_both_ids_to_match() {
+            assert!(validate_round(4, 2, 4, 2).is_ok());
+
+            for (received_window, received_round) in [(3, 2), (4, 3), (3, 3), (0, 0)] {
+                let error = validate_round(received_window, received_round, 4, 2).unwrap_err();
+
+                assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            }
+        }
+    }
 }
 
 #[derive(fmt::Debug)]
@@ -78,6 +109,9 @@ use services::Service::{Client, Leader, Publisher, Worker};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+const LEGACY_WINDOW: u64 = 1;
+const LEGACY_ROUND: u32 = 1;
+
 #[derive(Clone)]
 struct PublisherRemote {
     start: Arc<Notify>,
@@ -109,6 +143,19 @@ pub async fn run_in_process<C>(
 where
     C: 'static + Store + Clone + Sync + Send,
 {
+    run_in_process_for_round(experiment, config, LEGACY_WINDOW, LEGACY_ROUND, tls).await
+}
+
+pub async fn run_in_process_for_round<C>(
+    experiment: Experiment,
+    config: C,
+    window: u64,
+    round: u32,
+    tls: Option<(Identity, Certificate)>,
+) -> Result<Duration, Box<dyn std::error::Error + Sync + Send>>
+where
+    C: 'static + Store + Clone + Sync + Send,
+{
     experiment::write_to_store(&config, &experiment).await?;
     let started = Arc::new(Notify::new());
     // +2: +1 for the "done" notification from the publisher, +1 for the timer task
@@ -128,38 +175,46 @@ where
         let protocol = experiment.get_protocol().clone();
         let net = net::Config::with_free_port_localhost(tls.clone());
         handles.push(match service {
-            Publisher(info) => publisher::run(
+            Publisher(info) => publisher::run_for_round(
                 config.clone(),
                 protocol,
                 info,
+                window,
+                round,
                 net,
                 remote.clone(),
                 shutdown,
                 5000,
             )
             .boxed(),
-            Leader(info) => leader::run(
+            Leader(info) => leader::run_for_round(
                 config.clone(),
                 experiment.clone(),
                 protocol,
                 info,
+                window,
+                round,
                 net,
                 shutdown,
             )
             .boxed(),
-            Worker(info) => worker::run(
+            Worker(info) => worker::run_for_round(
                 config.clone(),
                 experiment.clone(),
                 protocol,
                 info,
+                window,
+                round,
                 net,
                 shutdown,
             )
             .boxed(),
-            Client(info) => client::viewer::run(
+            Client(info) => client::viewer::run_for_round(
                 config.clone(),
                 protocol,
                 info,
+                window,
+                round,
                 experiment.hammer,
                 net.tls_cert().clone(),
                 100,

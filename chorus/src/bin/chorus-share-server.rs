@@ -1,4 +1,7 @@
-use chorus::share_server::{self, ShareServerId};
+use chorus::{
+    share_server::{self, ShareServerId},
+    MainRoundContext, RoundId, WindowId,
+};
 use clap::{crate_authors, crate_version, Parser};
 use spectrum::{cli, config, experiment, net::Config as NetConfig};
 use tokio::{signal::ctrl_c, sync::watch};
@@ -12,6 +15,14 @@ struct Args {
     /// The CHORUS ShareServer identity: A or B.
     #[clap(long, env = "CHORUS_SHARE_SERVER")]
     server: ShareServerId,
+
+    /// Current CHORUS window.
+    #[clap(long, env = "CHORUS_WINDOW", default_value = "1")]
+    window: u64,
+
+    /// Current main-round number within the window.
+    #[clap(long, env = "CHORUS_ROUND", default_value = "1")]
+    round: u32,
 }
 
 async fn wait_for_shutdown(mut receiver: watch::Receiver<bool>) {
@@ -30,6 +41,8 @@ async fn wait_for_shutdown(mut receiver: watch::Receiver<bool>) {
 async fn main() -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
     let args = Args::parse();
     args.logs.init();
+    let expected_round =
+        MainRoundContext::new(WindowId::new(args.window), RoundId::try_from(args.round)?);
 
     let config = config::from_env().await?;
     let experiment = experiment::read_from_store(&config).await?;
@@ -41,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
 
     let server = share_server::run_development(
         args.server,
+        expected_round,
         config,
         experiment,
         worker_net,

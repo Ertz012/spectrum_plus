@@ -37,6 +37,9 @@ message RegisterClientResponse {
 message UploadRequest {
   ClientId client_id = 1;
   protocol_protos.WriteToken write_token = 2;
+
+  uint64 window = 3;
+  uint32 round = 4;
 }
 
 message UploadResponse {
@@ -46,6 +49,12 @@ message VerifyRequest {
   // TODO(zjn): repeated to allow batching?
   ClientId client_id = 1;
   protocol_protos.AuditShare audit_share = 2;
+
+  // CHORUS main-round identity.
+  uint64 window = 3;
+  uint32 round = 4;
+
+  WorkerId worker_id = 5;
 }
 
 message VerifyResponse {
@@ -57,6 +66,13 @@ service Leader {
 
 message AggregateWorkerRequest {
   protocol_protos.Share share = 1;
+
+  // CHORUS main-round identity.
+  uint64 window = 2;
+  uint32 round = 3;
+
+  // Spectrum worker that produced this aggregate.
+  WorkerId worker_id = 4;
 }
 
 message AggregateWorkerResponse {
@@ -68,6 +84,14 @@ service Publisher {
 
 message AggregateGroupRequest {
   protocol_protos.Share share = 1;
+
+  // Zero-based Spectrum group.
+  // CHORUS development mapping: group 0 = A, group 1 = B.
+  uint32 group = 2;
+
+  // CHORUS main-round identity.
+  uint64 window = 3;
+  uint32 round = 4;
 }
 
 message AggregateGroupResponse {
