@@ -40,6 +40,30 @@ impl From<TwoKeyPubAuthKey> for ChannelKeyWrapper {
     }
 }
 
+impl ChannelKeyWrapper {
+    pub fn secure_private_from_bytes(bytes: [u8; 32]) -> Result<Self, &'static str> {
+        TwoKeyPubAuthKey::from_private_key_bytes(bytes).map(Self::SecurePub)
+    }
+
+    pub fn secure_public_from_bytes(bytes: [u8; 32]) -> Result<Self, &'static str> {
+        TwoKeyPubAuthKey::from_public_key_bytes(bytes).map(Self::SecurePub)
+    }
+
+    pub fn contains_private_key(&self) -> bool {
+        match self {
+            Self::Secure(_) => true,
+            Self::SecurePub(key) => key.has_private_key(),
+        }
+    }
+
+    pub fn public_key_bytes(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Secure(_) => None,
+            Self::SecurePub(key) => Some(key.public_key_bytes()),
+        }
+    }
+}
+
 impl TryFrom<ChannelKeyWrapper> for AuthKey {
     type Error = &'static str;
 
@@ -162,7 +186,7 @@ impl ProtocolWrapper {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use spectrum_primitives::check_roundtrip;
+    use spectrum_primitives::{check_roundtrip, Sampleable};
     use std::convert::TryInto;
 
     // TODO: remove
@@ -179,4 +203,21 @@ mod tests {
         |w: ChannelKeyWrapper| w.try_into().unwrap(),
         authkey_channelkeywrapper_rt
     );
+
+    #[test]
+    fn public_wrapper_does_not_contain_member_secret() {
+        let full = TwoKeyPubAuthKey::sample();
+        let public = ChannelKeyWrapper::secure_public_from_bytes(full.public_key_bytes()).unwrap();
+        assert!(ChannelKeyWrapper::from(full).contains_private_key());
+        assert!(!public.contains_private_key());
+    }
+
+    #[test]
+    fn private_wrapper_restores_member_secret() {
+        let mut bytes = [0; 32];
+        bytes[0] = 1;
+        let key = ChannelKeyWrapper::secure_private_from_bytes(bytes).unwrap();
+        assert!(key.contains_private_key());
+        assert!(key.public_key_bytes().is_some());
+    }
 }

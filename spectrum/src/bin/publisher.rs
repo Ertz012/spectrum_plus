@@ -50,7 +50,7 @@ impl publisher::Remote for CliRemote {
         start.replace(Instant::now());
     }
 
-    async fn done(&self) {
+    async fn done(&self, _result: Vec<Vec<u8>>) {
         let start = self.start.lock().await;
         let elapsed = start.expect("Can't call done() before start()!").elapsed();
         eprintln!("Elapsed time: {}ms", elapsed.as_millis());

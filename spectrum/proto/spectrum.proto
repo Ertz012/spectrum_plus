@@ -92,6 +92,12 @@ message AggregateGroupRequest {
   // CHORUS main-round identity.
   uint64 window = 3;
   uint32 round = 4;
+
+  // Optional authenticated aggregate metadata.
+  // Legacy Spectrum leaves these fields empty or zero.
+  uint32 version = 5;
+  bytes configuration_hash = 6;
+  bytes signature = 7;
 }
 
 message AggregateGroupResponse {

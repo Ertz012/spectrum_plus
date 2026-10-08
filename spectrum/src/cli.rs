@@ -1,5 +1,7 @@
 use crate::{
-    experiment::Experiment, net::Config as NetConfig, protocols::wrapper::ProtocolWrapper,
+    experiment::Experiment,
+    net::{Config as NetConfig, TlsConfig},
+    protocols::wrapper::ProtocolWrapper,
 };
 
 use clap::Parser;
@@ -88,21 +90,25 @@ pub struct TlsServerArgs {
 
     #[clap(flatten)]
     tls_ca: TlsCaArgs,
+
+    /// DNS name expected in peer TLS certificates. Defaults to the endpoint host.
+    #[clap(long = "tls-domain", env = "SPECTRUM_TLS_DOMAIN")]
+    domain_name: Option<String>,
 }
 
-impl From<TlsServerArgs> for Option<(Identity, Certificate)> {
-    fn from(args: TlsServerArgs) -> Option<(Identity, Certificate)> {
-        match (args.cert_file, args.key_file) {
-            (None, None) => None,
-            (Some(cert_file), Some(key_file)) => {
+impl From<TlsServerArgs> for Option<TlsConfig> {
+    fn from(args: TlsServerArgs) -> Option<TlsConfig> {
+        match (args.cert_file, args.key_file, args.tls_ca.ca_file) {
+            (None, None, None) => None,
+            (Some(cert_file), Some(key_file), Some(ca_file)) => {
                 let cert = std::fs::read_to_string(cert_file).unwrap();
                 let key = std::fs::read_to_string(key_file).unwrap();
                 let identity = Identity::from_pem(cert, key);
-                let cert: Option<Certificate> = args.tls_ca.into();
-                Some(identity).zip(cert)
+                let ca = Certificate::from_pem(std::fs::read_to_string(ca_file).unwrap());
+                Some(TlsConfig::new(identity, ca, args.domain_name))
             }
             _ => {
-                panic!("TLS cert and key must be provided together.");
+                panic!("TLS cert, key, and CA must be provided together.");
             }
         }
     }
@@ -126,7 +132,7 @@ impl From<TlsCaArgs> for Option<Certificate> {
 
 impl From<NetArgs> for NetConfig {
     fn from(args: NetArgs) -> NetConfig {
-        let tls: Option<(Identity, Certificate)> = args.tls.into();
+        let tls: Option<TlsConfig> = args.tls.into();
         match (args.local_port, args.public_addr) {
             (None, None) => NetConfig::with_free_port_localhost(tls),
             (None, Some(public_addr)) => NetConfig::with_free_port(public_addr, tls),

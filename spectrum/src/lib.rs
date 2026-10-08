@@ -17,7 +17,6 @@ use tokio::{
     sync::{Barrier, Notify},
     time::sleep,
 };
-use tonic::transport::{Certificate, Identity};
 
 pub use spectrum_protocol as protocols;
 pub use spectrum_protocol::proto as protocol_protos;
@@ -130,7 +129,7 @@ impl publisher::Remote for PublisherRemote {
         self.start.notify_one()
     }
 
-    async fn done(&self) {
+    async fn done(&self, _result: Vec<Vec<u8>>) {
         self.done.wait().await;
     }
 }
@@ -138,7 +137,7 @@ impl publisher::Remote for PublisherRemote {
 pub async fn run_in_process<C>(
     experiment: Experiment,
     config: C,
-    tls: Option<(Identity, Certificate)>,
+    tls: Option<net::TlsConfig>,
 ) -> Result<Duration, Box<dyn std::error::Error + Sync + Send>>
 where
     C: 'static + Store + Clone + Sync + Send,
@@ -151,7 +150,7 @@ pub async fn run_in_process_for_round<C>(
     config: C,
     window: u64,
     round: u32,
-    tls: Option<(Identity, Certificate)>,
+    tls: Option<net::TlsConfig>,
 ) -> Result<Duration, Box<dyn std::error::Error + Sync + Send>>
 where
     C: 'static + Store + Clone + Sync + Send,
@@ -216,7 +215,7 @@ where
                 window,
                 round,
                 experiment.hammer,
-                net.tls_cert().clone(),
+                net.tls_config(),
                 100,
                 shutdown,
             )

@@ -1,10 +1,9 @@
 use rand::{thread_rng, Rng};
 use std::iter::repeat_with;
-use tonic::transport::Certificate;
 
 use clap::{crate_authors, crate_version, Parser};
 use futures::stream::{FuturesUnordered, StreamExt};
-use spectrum::{cli, client, config, experiment, services::ClientInfo};
+use spectrum::{cli, client, config, experiment, net::TlsConfig, services::ClientInfo};
 
 /// Run a Spectrum viewing client.
 ///
@@ -26,7 +25,7 @@ struct Args {
     #[clap(long, env = "SPECTRUM_VIEWER_THREADS", default_value = "1")]
     threads: u16,
     #[clap(flatten)]
-    tls: cli::TlsCaArgs,
+    tls: cli::TlsServerArgs,
     /// Max jitter. Useful for big big messages (make big).
     #[clap(long, env = "SPECTRUM_MAX_JITTER_MILLIS", default_value = "100")]
     max_jitter: u64,
@@ -44,7 +43,7 @@ fn main() {
             let config = config::from_env().await?;
             let experiment = experiment::read_from_store(&config).await?;
             let hammer = experiment.hammer;
-            let tls: Option<Certificate> = args.tls.into();
+            let tls: Option<TlsConfig> = args.tls.into();
             let max_jitter = args.max_jitter;
 
             repeat_with(|| {

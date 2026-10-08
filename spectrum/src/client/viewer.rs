@@ -2,6 +2,7 @@ use crate::proto::{self, UploadRequest};
 use crate::{
     client::connections,
     config,
+    net::TlsConfig,
     protocols::{wrapper::ChannelKeyWrapper, wrapper::ProtocolWrapper, Protocol},
     services::{
         quorum::{delay_until, wait_for_start_time_set},
@@ -15,7 +16,6 @@ use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use log::{debug, error, info, trace, warn};
 use tokio::time::sleep;
-use tonic::transport::Certificate;
 
 use std::fmt;
 use std::time::Duration;
@@ -36,7 +36,7 @@ async fn inner_run<C, F, P>(
     window: u64,
     round: u32,
     hammer: bool,
-    cert: Option<Certificate>,
+    tls: Option<TlsConfig>,
     max_jitter: u64,
     shutdown: F,
 ) -> Result<(), TokioError>
@@ -60,7 +60,7 @@ where
     let start_time = wait_for_start_time_set(&config).await?;
     debug!("Received configuration from configuration server; initializing.");
 
-    let clients: Vec<_> = connections::connect_and_register(&config, info.clone(), cert).await?;
+    let clients: Vec<_> = connections::connect_and_register(&config, info.clone(), tls).await?;
     let client_id = info.to_proto(); // before we move info
 
     let jitter = Duration::from_millis(rand::random::<u64>() % max_jitter);
@@ -68,15 +68,15 @@ where
 
     {
         // free the write token memory after send!
+        let broadcast_channel = info.broadcast_channel;
+        let client_idx = info.idx;
         let mut write_tokens = match info.broadcast {
             Some((msg, key)) => {
                 info!("Broadcaster about to send write token.");
-                debug!("Write token: msg.len()={}, key={:?}", msg.len(), key);
-                protocol.broadcast(
-                    msg.try_into().unwrap(),
-                    info.idx.try_into().expect("idx should be small"),
-                    key.try_into().unwrap(),
-                )
+                debug!("Write token prepared: msg.len()={}", msg.len());
+                let channel = broadcast_channel
+                    .unwrap_or_else(|| client_idx.try_into().expect("idx should be small"));
+                protocol.broadcast(msg.try_into().unwrap(), channel, key.try_into().unwrap())
             }
             None => protocol.cover(),
         };
@@ -117,7 +117,8 @@ where
                             sleep(Duration::from_millis(100)).await;
                         }
                         info!("Request took {}ms.", start_time.elapsed().as_millis());
-                        debug!("RESPONSE={:?}", response.into_inner());
+                        let _ = response.into_inner();
+                        debug!("Upload completed.");
                     })
                 })
                 .collect::<FuturesUnordered<_>>()
@@ -142,7 +143,7 @@ pub async fn run<C, F>(
     protocol: ProtocolWrapper,
     info: ClientInfo,
     hammer: bool,
-    cert: Option<Certificate>,
+    tls: Option<TlsConfig>,
     max_jitter: u64,
     shutdown: F,
 ) -> Result<(), TokioError>
@@ -157,7 +158,7 @@ where
         LEGACY_WINDOW,
         LEGACY_ROUND,
         hammer,
-        cert,
+        tls,
         max_jitter,
         shutdown,
     )
@@ -171,7 +172,7 @@ pub async fn run_for_round<C, F>(
     window: u64,
     round: u32,
     hammer: bool,
-    cert: Option<Certificate>,
+    tls: Option<TlsConfig>,
     max_jitter: u64,
     shutdown: F,
 ) -> Result<(), TokioError>
@@ -182,19 +183,19 @@ where
     match protocol {
         ProtocolWrapper::Secure(protocol) => {
             inner_run(
-                config, protocol, info, window, round, hammer, cert, max_jitter, shutdown,
+                config, protocol, info, window, round, hammer, tls, max_jitter, shutdown,
             )
             .await?;
         }
         ProtocolWrapper::SecurePub(protocol) => {
             inner_run(
-                config, protocol, info, window, round, hammer, cert, max_jitter, shutdown,
+                config, protocol, info, window, round, hammer, tls, max_jitter, shutdown,
             )
             .await?;
         }
         ProtocolWrapper::SecureMultiKey(protocol) => {
             inner_run(
-                config, protocol, info, window, round, hammer, cert, max_jitter, shutdown,
+                config, protocol, info, window, round, hammer, tls, max_jitter, shutdown,
             )
             .await?;
         }

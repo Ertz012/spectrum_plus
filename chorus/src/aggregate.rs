@@ -1,4 +1,5 @@
 use crate::{share_server::ShareServerId, MainRoundContext};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use std::{error::Error, fmt};
 
 pub const AGGREGATE_SHARE_VERSION: u16 = 1;
@@ -63,21 +64,40 @@ impl AggregateSharePayload {
         &self.channel_data
     }
 
-    pub fn signing_bytes(&self) -> Result<Vec<u8>, AggregateShareEncodingError> {
-        let channel_count = u32::try_from(self.channel_data.len())
-            .map_err(|_| AggregateShareEncodingError::TooManyChannels(self.channel_data.len()))?;
+    pub fn into_channel_data(self) -> Vec<Vec<u8>> {
+        self.channel_data
+    }
 
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, AggregateShareEncodingError> {
+        Self::signing_bytes_from_parts(
+            self.version,
+            self.server,
+            self.context,
+            self.configuration_hash,
+            &self.channel_data,
+        )
+    }
+
+    pub(crate) fn signing_bytes_from_parts(
+        version: u16,
+        server: ShareServerId,
+        context: MainRoundContext,
+        configuration_hash: ConfigurationHash,
+        channel_data: &[Vec<u8>],
+    ) -> Result<Vec<u8>, AggregateShareEncodingError> {
+        let channel_count = u32::try_from(channel_data.len())
+            .map_err(|_| AggregateShareEncodingError::TooManyChannels(channel_data.len()))?;
         let mut bytes = Vec::new();
 
         bytes.extend_from_slice(SIGNING_DOMAIN);
-        bytes.extend_from_slice(&self.version.to_be_bytes());
-        bytes.push(server_tag(self.server));
-        bytes.extend_from_slice(&self.context.window().get().to_be_bytes());
-        bytes.extend_from_slice(&self.context.round().get().to_be_bytes());
-        bytes.extend_from_slice(self.configuration_hash.as_bytes());
+        bytes.extend_from_slice(&version.to_be_bytes());
+        bytes.push(server_tag(server));
+        bytes.extend_from_slice(&context.window().get().to_be_bytes());
+        bytes.extend_from_slice(&context.round().get().to_be_bytes());
+        bytes.extend_from_slice(configuration_hash.as_bytes());
         bytes.extend_from_slice(&channel_count.to_be_bytes());
 
-        for (index, channel) in self.channel_data.iter().enumerate() {
+        for (index, channel) in channel_data.iter().enumerate() {
             let channel_length = u32::try_from(channel.len()).map_err(|_| {
                 AggregateShareEncodingError::ChannelTooLarge {
                     index,
@@ -90,6 +110,50 @@ impl AggregateSharePayload {
         }
 
         Ok(bytes)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SignedAggregateShare {
+    payload: AggregateSharePayload,
+    signature: Signature,
+}
+
+impl SignedAggregateShare {
+    pub fn sign(
+        payload: AggregateSharePayload,
+        signing_key: &SigningKey,
+    ) -> Result<Self, AggregateShareEncodingError> {
+        let signing_bytes = payload.signing_bytes()?;
+        let signature = signing_key.sign(&signing_bytes);
+
+        Ok(Self { payload, signature })
+    }
+
+    pub fn payload(&self) -> &AggregateSharePayload {
+        &self.payload
+    }
+
+    pub fn signature_bytes(&self) -> [u8; 64] {
+        self.signature.to_bytes()
+    }
+
+    pub fn into_parts(self) -> (AggregateSharePayload, [u8; 64]) {
+        (self.payload, self.signature.to_bytes())
+    }
+
+    pub fn verify(
+        &self,
+        verifying_key: &VerifyingKey,
+    ) -> Result<(), AggregateShareVerificationError> {
+        let signing_bytes = self
+            .payload
+            .signing_bytes()
+            .map_err(AggregateShareVerificationError::Encoding)?;
+
+        verifying_key
+            .verify_strict(&signing_bytes, &self.signature)
+            .map_err(AggregateShareVerificationError::InvalidSignature)
     }
 }
 
@@ -122,6 +186,34 @@ impl fmt::Display for AggregateShareEncodingError {
 }
 
 impl Error for AggregateShareEncodingError {}
+
+#[derive(Debug)]
+pub enum AggregateShareVerificationError {
+    Encoding(AggregateShareEncodingError),
+    InvalidSignature(ed25519_dalek::SignatureError),
+}
+
+impl fmt::Display for AggregateShareVerificationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Encoding(error) => {
+                write!(formatter, "could not encode aggregate share: {}", error)
+            }
+            Self::InvalidSignature(error) => {
+                write!(formatter, "invalid aggregate signature: {}", error)
+            }
+        }
+    }
+}
+
+impl Error for AggregateShareVerificationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Encoding(error) => Some(error),
+            Self::InvalidSignature(error) => Some(error),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -188,5 +280,55 @@ mod tests {
             first.signing_bytes().unwrap(),
             second.signing_bytes().unwrap()
         );
+    }
+    fn test_signing_key(value: u8) -> SigningKey {
+        SigningKey::from_bytes(&[value; 32])
+    }
+
+    #[test]
+    fn correctly_signed_aggregate_is_accepted() {
+        let signing_key = test_signing_key(7);
+        let verifying_key = signing_key.verifying_key();
+
+        let signed = SignedAggregateShare::sign(
+            payload(ShareServerId::A, 1, vec![vec![1, 2, 3]]),
+            &signing_key,
+        )
+        .unwrap();
+
+        assert!(signed.verify(&verifying_key).is_ok());
+    }
+
+    #[test]
+    fn another_servers_key_is_rejected() {
+        let server_a_key = test_signing_key(7);
+        let server_b_key = test_signing_key(9);
+
+        let signed = SignedAggregateShare::sign(
+            payload(ShareServerId::A, 1, vec![vec![1, 2, 3]]),
+            &server_a_key,
+        )
+        .unwrap();
+
+        assert!(signed.verify(&server_b_key.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn changing_the_payload_invalidates_the_signature() {
+        let signing_key = test_signing_key(7);
+        let verifying_key = signing_key.verifying_key();
+
+        let signed = SignedAggregateShare::sign(
+            payload(ShareServerId::A, 1, vec![vec![1, 2, 3]]),
+            &signing_key,
+        )
+        .unwrap();
+
+        let tampered = SignedAggregateShare {
+            payload: payload(ShareServerId::A, 2, vec![vec![1, 2, 3]]),
+            signature: signed.signature,
+        };
+
+        assert!(tampered.verify(&verifying_key).is_err());
     }
 }

@@ -2,7 +2,8 @@ use clap::{crate_authors, crate_version, ArgGroup, Parser};
 use futures::prelude::*;
 use rand::{thread_rng, Rng};
 use spectrum::{
-    cli, client, config, experiment, protocols::wrapper::ChannelKeyWrapper, services::ClientInfo,
+    cli, client, config, experiment, net::TlsConfig, protocols::wrapper::ChannelKeyWrapper,
+    services::ClientInfo,
 };
 use spectrum_primitives::Bytes;
 use std::convert::TryFrom;
@@ -26,6 +27,8 @@ struct Args {
     logs: cli::LogArgs,
     #[clap(flatten)]
     client: BroadcasterArgs,
+    #[clap(flatten)]
+    tls: cli::TlsServerArgs,
     /// Max jitter. Useful for big big messages (make big).
     #[clap(long, env = "SPECTRUM_MAX_JITTER_MILLIS", default_value = "100")]
     max_jitter: u64,
@@ -88,13 +91,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
 
     let config = config::from_env().await?;
     let experiment = experiment::read_from_store(&config).await?;
+    let tls: Option<TlsConfig> = args.tls.into();
     let info = ClientInfo::try_from(args.client)?;
     client::viewer::run(
         config,
         experiment.get_protocol().clone(),
         info,
         experiment.hammer,
-        None,
+        tls,
         args.max_jitter,
         ctrl_c().map(|_| ()),
     )

@@ -1,11 +1,11 @@
-use crate::config::store::Error;
+use crate::{
+    config::store::Error,
+    net::{self, TlsConfig},
+};
 use log::debug;
 use std::time::Duration;
 use tokio::time::sleep;
-use tonic::{
-    transport::Certificate, transport::Channel, transport::ClientTlsConfig, transport::Uri,
-    Request, Response, Status,
-};
+use tonic::{Request, Response, Status};
 
 pub mod spectrum {
     tonic::include_proto!("grpc.health.v1");
@@ -37,19 +37,15 @@ impl Health for AllGoodHealthServer {
     }
 }
 
-async fn is_healthy(addr: Uri, tls: Option<Certificate>) -> Result<bool, Error> {
-    let mut builder = Channel::builder(addr.clone());
-    if let Some(ref cert) = tls {
-        debug!("TLS for client.");
-        builder = builder
-            .tls_config(
-                ClientTlsConfig::new()
-                    .domain_name("spectrum.example.com")
-                    .ca_certificate(cert.clone()),
-            )
-            .map_err(|e| format!("{:?}", e))?;
+async fn is_healthy(addr: &str, tls: Option<&TlsConfig>) -> Result<bool, Error> {
+    if tls.is_some() {
+        debug!("mTLS for health client.");
     }
-    let channel = builder.connect().await.map_err(|err| err.to_string())?;
+    let channel = net::endpoint(addr, tls)
+        .map_err(|error| error.to_string())?
+        .connect()
+        .await
+        .map_err(|error| error.to_string())?;
     let mut client = HealthClient::new(channel);
     let req = Request::new(HealthCheckRequest {
         service: "".to_string(),
@@ -62,11 +58,11 @@ pub async fn wait_for_health_helper(
     addr: String,
     delay: Duration,
     attempts: usize,
-    tls: Option<Certificate>,
+    tls: Option<TlsConfig>,
 ) -> Result<(), Error> {
-    let uri = addr.parse::<Uri>().expect("invalid addr");
+    let mut last_error = None;
     for _ in 0..attempts {
-        match is_healthy(uri.clone(), tls.clone()).await {
+        match is_healthy(&addr, tls.as_ref()).await {
             Ok(response) => {
                 if response {
                     return Ok(());
@@ -74,16 +70,18 @@ pub async fn wait_for_health_helper(
             }
             Err(err) => {
                 debug!("Error checking health: {}", err);
+                last_error = Some(err.to_string());
             }
         }
         sleep(delay).await;
     }
+    let cause = last_error.unwrap_or_else(|| "service reported a non-serving status".to_string());
     Err(Error::new(&format!(
-        "Service not healthy after {} attempts",
-        attempts
+        "Service at {} not healthy after {} attempts: {}",
+        addr, attempts, cause
     )))
 }
 
-pub async fn wait_for_health(addr: String, tls: Option<Certificate>) -> Result<(), Error> {
+pub async fn wait_for_health(addr: String, tls: Option<TlsConfig>) -> Result<(), Error> {
     wait_for_health_helper(addr, RETRY_DELAY, RETRY_ATTEMPTS, tls).await
 }

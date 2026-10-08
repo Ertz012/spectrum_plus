@@ -2,6 +2,7 @@ use crate::proto::{worker_client::WorkerClient, RegisterClientRequest};
 use crate::Error;
 use crate::{
     config,
+    net::{self, TlsConfig},
     services::{
         discovery::{resolve_all, Node},
         ClientInfo, Group, Service,
@@ -12,7 +13,7 @@ use config::store::Store;
 use log::{debug, trace};
 use rand::{seq::IteratorRandom, thread_rng};
 use tokio::time::sleep;
-use tonic::transport::{channel::Channel, Certificate, ClientTlsConfig, Uri};
+use tonic::transport::channel::Channel;
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -50,23 +51,14 @@ fn pick_worker_shards(nodes: Vec<Node>) -> Vec<Node> {
 
 async fn connect(
     addr: String,
-    cert: Option<Certificate>,
+    tls: Option<TlsConfig>,
 ) -> Result<WorkerClient<Channel>, TokioError> {
     let mut attempts: u8 = 0;
-    let uri = format!("http://{}", addr)
-        .parse::<Uri>()
-        .expect("Invalid URI");
     loop {
-        let mut builder = Channel::builder(uri.clone());
-        if let Some(ref cert) = cert {
-            debug!("TLS for client.");
-            builder = builder.tls_config(
-                ClientTlsConfig::new()
-                    .domain_name("spectrum.example.com")
-                    .ca_certificate(cert.clone()),
-            )?;
+        if tls.is_some() {
+            debug!("mTLS for client.");
         }
-        let res = builder.connect().await;
+        let res = net::endpoint(&addr, tls.as_ref())?.connect().await;
         if let Ok(channel) = res {
             return Ok(WorkerClient::new(channel));
         }
@@ -85,7 +77,7 @@ async fn connect(
 pub async fn connect_and_register<C>(
     config: &C,
     info: ClientInfo,
-    cert: Option<Certificate>,
+    tls: Option<TlsConfig>,
 ) -> Result<Vec<WorkerClient<Channel>>, TokioError>
 where
     C: Store,
@@ -104,7 +96,7 @@ where
             .collect(),
     };
     for shard in shards {
-        let mut client = connect(shard.addr.clone(), cert.clone()).await?;
+        let mut client = connect(shard.addr.clone(), tls.clone()).await?;
         let req = tonic::Request::new(req.clone());
         trace!("Registering with shard {}...", shard.addr);
         client.register_client(req).await?;

@@ -34,8 +34,22 @@ use tokio::{
 use tonic::{transport::Channel, Request, Response, Status};
 
 type SharedPublisherClient = Arc<Mutex<PublisherClient<Channel>>>;
+
 const LEGACY_WINDOW: u64 = 1;
 const LEGACY_ROUND: u32 = 1;
+
+pub trait AggregateDecorator: Send + Sync + 'static {
+    fn decorate(&self, request: &mut AggregateGroupRequest) -> Result<(), Status>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoopAggregateDecorator;
+
+impl AggregateDecorator for NoopAggregateDecorator {
+    fn decorate(&self, _request: &mut AggregateGroupRequest) -> Result<(), Status> {
+        Ok(())
+    }
+}
 
 fn record_worker(
     received_workers: &mut HashSet<WorkerInfo>,
@@ -65,6 +79,7 @@ fn record_worker(
 
 pub struct MyLeader<P: Protocol> {
     accumulator: Arc<Accumulator<Vec<P::Accumulator>>>,
+    decorator: Arc<dyn AggregateDecorator>,
     received_workers: Mutex<HashSet<WorkerInfo>>,
     group: Group,
     window: u64,
@@ -84,10 +99,12 @@ where
         window: u64,
         round: u32,
         workers_per_group: u16,
+        decorator: Arc<dyn AggregateDecorator>,
         publisher_client: watch::Receiver<Option<SharedPublisherClient>>,
     ) -> Self {
         MyLeader {
             accumulator: Arc::new(Accumulator::new(protocol.new_accumulator())),
+            decorator,
             received_workers: Mutex::new(HashSet::with_capacity(workers_per_group as usize)),
             group,
             window,
@@ -136,6 +153,7 @@ where
             )?;
         }
         let accumulator = self.accumulator.clone();
+        let decorator = self.decorator.clone();
         let total_workers = self.total_workers;
         let publisher = self
             .publisher_client
@@ -165,12 +183,23 @@ where
             let share = accumulator.get().await;
             let share: Vec<Vec<u8>> = share.into_iter().map(Into::<Vec<u8>>::into).collect();
             // trace!("Leader final shares: {:?}", share);
-            let req = Request::new(AggregateGroupRequest {
+            let mut aggregate = AggregateGroupRequest {
                 share: Some(Share { data: share }),
                 group,
                 window,
                 round,
-            });
+                version: 0,
+                configuration_hash: Vec::new(),
+                signature: Vec::new(),
+            };
+
+            if let Err(status) = decorator.decorate(&mut aggregate) {
+                error!("Could not decorate group aggregate: {}", status);
+                return;
+            }
+
+            let req = Request::new(aggregate);
+
             publisher.lock().await.aggregate_group(req).await.unwrap();
         });
 
@@ -178,13 +207,14 @@ where
     }
 }
 
-async fn inner_run<C, F, P>(
+async fn inner_run<C, F, P, D>(
     config: C,
     experiment: Experiment,
     protocol: P,
     info: LeaderInfo,
     window: u64,
     round: u32,
+    decorator: D,
     net: NetConfig,
     shutdown: F,
 ) -> Result<(), Box<dyn std::error::Error + Sync + Send>>
@@ -192,6 +222,7 @@ where
     C: Store,
     F: Future<Output = ()> + Send + 'static,
     P: Protocol + 'static,
+    D: AggregateDecorator,
     P::Accumulator: Sync + Send + Clone + TryFrom<Bytes> + Into<Vec<u8>>,
     Share: TryInto<Vec<P::Accumulator>>,
     <Share as TryInto<Vec<P::Accumulator>>>::Error: Debug,
@@ -203,17 +234,22 @@ where
         window,
         round,
         experiment.group_size(),
+        Arc::new(decorator),
         rx,
     );
     info!("Leader starting up.");
-    let server_task = tokio::spawn(
-        tonic::transport::server::Server::builder()
-            .add_service(HealthServer::new(AllGoodHealthServer::default()))
-            .add_service(LeaderServer::new(state))
-            .serve_with_shutdown(net.local_socket_addr(), shutdown),
-    );
+    let mut builder = tonic::transport::server::Server::builder();
+    if let Some(tls) = net.server_tls_config() {
+        info!("Adding mTLS config.");
+        builder = builder.tls_config(tls)?;
+    }
+    let server = builder
+        .add_service(HealthServer::new(AllGoodHealthServer::default()))
+        .add_service(LeaderServer::new(state))
+        .serve_with_shutdown(net.local_socket_addr(), shutdown);
+    let server_task = tokio::spawn(server);
 
-    wait_for_health(format!("http://{}", net.public_addr()), None).await?;
+    wait_for_health(net.public_addr(), net.tls_config()).await?;
     trace!("Leader {:?} healthy and serving.", info);
 
     let node = Node::new(info.into(), net.public_addr());
@@ -231,9 +267,9 @@ where
         })
         .expect("Should have a publisher registered");
 
-    let publisher = Arc::new(Mutex::new(
-        PublisherClient::connect(format!("http://{}", publisher_addr)).await?,
-    ));
+    let publisher = Arc::new(Mutex::new(PublisherClient::new(
+        net.endpoint_for(&publisher_addr)?.connect().await?,
+    )));
     tx.send(Some(publisher))
         .map_err(|_| "Error sending service registry.")?;
 
@@ -281,22 +317,52 @@ where
     C: Store,
     F: Future<Output = ()> + Send + 'static,
 {
+    run_for_round_with_decorator(
+        config,
+        experiment,
+        protocol,
+        info,
+        window,
+        round,
+        NoopAggregateDecorator,
+        net,
+        shutdown,
+    )
+    .await
+}
+
+pub async fn run_for_round_with_decorator<C, F, D>(
+    config: C,
+    experiment: Experiment,
+    protocol: ProtocolWrapper,
+    info: LeaderInfo,
+    window: u64,
+    round: u32,
+    decorator: D,
+    net: NetConfig,
+    shutdown: F,
+) -> Result<(), Box<dyn std::error::Error + Sync + Send>>
+where
+    C: Store,
+    F: Future<Output = ()> + Send + 'static,
+    D: AggregateDecorator,
+{
     match protocol {
         ProtocolWrapper::Secure(protocol) => {
             inner_run(
-                config, experiment, protocol, info, window, round, net, shutdown,
+                config, experiment, protocol, info, window, round, decorator, net, shutdown,
             )
             .await?;
         }
         ProtocolWrapper::SecurePub(protocol) => {
             inner_run(
-                config, experiment, protocol, info, window, round, net, shutdown,
+                config, experiment, protocol, info, window, round, decorator, net, shutdown,
             )
             .await?;
         }
         ProtocolWrapper::SecureMultiKey(protocol) => {
             inner_run(
-                config, experiment, protocol, info, window, round, net, shutdown,
+                config, experiment, protocol, info, window, round, decorator, net, shutdown,
             )
             .await?;
         }
@@ -344,5 +410,28 @@ mod tests {
         assert_eq!(unknown.code(), tonic::Code::PermissionDenied);
 
         assert!(received_workers.is_empty());
+    }
+
+    struct TestDecorator;
+
+    impl AggregateDecorator for TestDecorator {
+        fn decorate(&self, request: &mut AggregateGroupRequest) -> Result<(), Status> {
+            request.version = 7;
+            request.configuration_hash = vec![1, 2, 3];
+            request.signature = vec![4, 5, 6];
+
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn aggregate_decorator_can_add_metadata() {
+        let mut request = AggregateGroupRequest::default();
+
+        TestDecorator.decorate(&mut request).unwrap();
+
+        assert_eq!(request.version, 7);
+        assert_eq!(request.configuration_hash, vec![1, 2, 3]);
+        assert_eq!(request.signature, vec![4, 5, 6]);
     }
 }

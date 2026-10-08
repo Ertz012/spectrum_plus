@@ -36,7 +36,7 @@ use tokio::{
     task::spawn_blocking,
     time::sleep,
 };
-use tonic::{transport::ServerTlsConfig, Request, Response, Status};
+use tonic::{Request, Response, Status};
 
 mod audit_registry;
 mod client_registry;
@@ -318,7 +318,7 @@ where
         let client_info = ClientInfo::from(&client_id);
         trace!("upload() client_info: {:?}", &client_info);
         let write_token = expect_field(request.write_token, "Write Token")?;
-        debug!("upload() write token: {:?}", &client_info);
+        debug!("upload() write token received");
         let state = self.state.clone();
         let worker_id: proto::WorkerId = self.info.into();
         let window = self.state.window;
@@ -502,9 +502,9 @@ where
     );
     let state = worker.state.clone();
     let mut builder = tonic::transport::server::Server::builder();
-    if let Some(identity) = net.tls_ident() {
-        info!("Adding TLS config.");
-        builder = builder.tls_config(ServerTlsConfig::new().identity(identity))?;
+    if let Some(tls) = net.server_tls_config() {
+        info!("Adding mTLS config.");
+        builder = builder.tls_config(tls)?;
     }
     let server = builder
         .add_service(HealthServer::new(AllGoodHealthServer::default()))
@@ -515,12 +515,14 @@ where
 
     sleep(std::time::Duration::from_millis(500)).await;
 
-    wait_for_health(format!("http://{}", net.public_addr()), net.tls_cert()).await?;
+    wait_for_health(net.public_addr(), net.tls_config()).await?;
     trace!("Worker {:?} healthy and serving.", info);
     register(&config, Node::new(info.into(), net.public_addr())).await?;
 
     let start_time = wait_for_start_time_set(&config).await.unwrap();
-    registry_remote.init(info, &config, net.tls_cert()).await?;
+    registry_remote
+        .init(info, &config, net.tls_config())
+        .await?;
     delay_until(start_time).await;
     start_tx.send(Some(Instant::now()))?;
 
@@ -587,7 +589,7 @@ where
     C: Store,
     F: Future<Output = ()> + Send + 'static,
 {
-    debug!("auth keys: {:?}", experiment.get_keys());
+    debug!("Configured {} channel keys.", experiment.channels());
 
     match protocol {
         ProtocolWrapper::Secure(protocol) => {

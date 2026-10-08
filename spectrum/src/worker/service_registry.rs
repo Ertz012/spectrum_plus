@@ -3,6 +3,7 @@
 use crate::proto::{leader_client::LeaderClient, worker_client::WorkerClient};
 use crate::{
     config::store::Store,
+    net::{self, TlsConfig},
     services::{discovery::resolve_all, Service, WorkerInfo},
 };
 
@@ -10,9 +11,7 @@ use log::debug;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
-use tonic::{
-    transport::Certificate, transport::Channel, transport::ClientTlsConfig, transport::Uri, Status,
-};
+use tonic::{transport::Channel, Status};
 
 type Error = Box<dyn std::error::Error + Sync + Send>;
 
@@ -30,7 +29,7 @@ impl Map {
     async fn from_config<C: Store>(
         worker: WorkerInfo,
         config: &C,
-        tls: Option<Certificate>,
+        tls: Option<TlsConfig>,
     ) -> Result<Self, Error> {
         let all_services = resolve_all(config).await?;
 
@@ -43,21 +42,10 @@ impl Map {
             })
             .collect();
         for (worker_info, addr) in peer_workers {
-            let uri = format!("https://{}", addr)
-                .parse::<Uri>()
-                .expect("bad addr");
-            let mut builder = Channel::builder(uri);
-            if let Some(ref cert) = tls {
-                debug!("TLS for WorkerClient.");
-                builder = builder
-                    .tls_config(
-                        ClientTlsConfig::new()
-                            .domain_name("spectrum.example.com")
-                            .ca_certificate(cert.clone()),
-                    )
-                    .map_err(|e| format!("{:?}", e))?;
+            if tls.is_some() {
+                debug!("mTLS for WorkerClient.");
             }
-            let channel = builder.connect().await.map_err(|err| err.to_string())?;
+            let channel = net::endpoint(&addr, tls.as_ref())?.connect().await?;
             let worker = WorkerClient::new(channel);
             workers.insert(worker_info, Arc::new(Mutex::new(worker)));
         }
@@ -69,9 +57,9 @@ impl Map {
                 _ => None,
             });
         let leader = if let Some(addr) = addr {
-            Some(Arc::new(Mutex::new(
-                LeaderClient::connect(format!("http://{}", addr)).await?,
-            )))
+            Some(Arc::new(Mutex::new(LeaderClient::new(
+                net::endpoint(&addr, tls.as_ref())?.connect().await?,
+            ))))
         } else {
             None
         };
@@ -87,7 +75,7 @@ impl Remote {
         &self,
         worker: WorkerInfo,
         config: &C,
-        tls: Option<Certificate>,
+        tls: Option<TlsConfig>,
     ) -> Result<(), Error>
     where
         C: Store,

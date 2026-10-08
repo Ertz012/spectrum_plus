@@ -8,7 +8,10 @@ use spectrum_primitives::Bytes;
 use crate::proto::{ClientId, WorkerId};
 use crate::protocols::wrapper::ChannelKeyWrapper;
 
-use std::hash::{Hash, Hasher};
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+};
 
 #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 #[non_exhaustive]
@@ -57,11 +60,18 @@ impl PublisherInfo {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct ClientInfo {
     pub idx: u128,
     pub broadcast: Option<(Bytes, ChannelKeyWrapper)>,
+    pub broadcast_channel: Option<usize>,
+}
+
+impl fmt::Debug for ClientInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ClientInfo { redacted }")
+    }
 }
 
 impl Hash for ClientInfo {
@@ -83,6 +93,7 @@ impl ClientInfo {
         ClientInfo {
             idx,
             broadcast: None,
+            broadcast_channel: None,
         }
     }
 
@@ -90,6 +101,20 @@ impl ClientInfo {
         ClientInfo {
             idx,
             broadcast: Some((message, key)),
+            broadcast_channel: None,
+        }
+    }
+
+    pub fn new_broadcaster_for_channel(
+        idx: u128,
+        channel: usize,
+        message: Bytes,
+        key: ChannelKeyWrapper,
+    ) -> Self {
+        ClientInfo {
+            idx,
+            broadcast: Some((message, key)),
+            broadcast_channel: Some(channel),
         }
     }
 }
@@ -155,5 +180,25 @@ impl From<&ClientId> for ClientInfo {
     fn from(client: &ClientId) -> ClientInfo {
         // TODO(zjn): change proto type of client_id from string to uint32
         ClientInfo::new(client.client_id.parse().expect("Should parse as number"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_debug_output_redacts_identity_and_broadcast_state() {
+        let cover = ClientInfo::new(42);
+        let mut private_key = [0; 32];
+        private_key[0] = 1;
+        let broadcaster = ClientInfo::new_broadcaster_for_channel(
+            84,
+            3,
+            vec![0xaa; 4].into(),
+            ChannelKeyWrapper::secure_private_from_bytes(private_key).unwrap(),
+        );
+        assert_eq!(format!("{:?}", cover), "ClientInfo { redacted }");
+        assert_eq!(format!("{:?}", broadcaster), "ClientInfo { redacted }");
     }
 }

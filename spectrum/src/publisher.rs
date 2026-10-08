@@ -20,7 +20,6 @@ use crate::{
 use chrono::prelude::*;
 use futures::prelude::*;
 use log::{debug, error, info, trace};
-use spectrum_primitives::Bytes;
 use std::{collections::HashSet, convert::TryInto, fmt::Debug, sync::Arc};
 use tokio::{spawn, sync::Mutex};
 use tonic::{Request, Response, Status};
@@ -31,7 +30,10 @@ const LEGACY_ROUND: u32 = 1;
 #[tonic::async_trait]
 pub trait Remote: Sync + Send + Clone {
     async fn start(&self);
-    async fn done(&self);
+    fn validate_aggregate(&self, _request: &AggregateGroupRequest) -> Result<(), Status> {
+        Ok(())
+    }
+    async fn done(&self, result: Vec<Vec<u8>>);
 }
 
 #[derive(Clone)]
@@ -40,7 +42,7 @@ pub struct NoopRemote;
 #[tonic::async_trait]
 impl Remote for NoopRemote {
     async fn start(&self) {}
-    async fn done(&self) {}
+    async fn done(&self, _result: Vec<Vec<u8>>) {}
 }
 
 fn record_group(
@@ -103,7 +105,7 @@ impl<R, P> Publisher for MyPublisher<R, P>
 where
     R: Remote + 'static,
     P: Protocol + 'static,
-    P::Accumulator: Clone + Sync + Send + Into<Bytes>,
+    P::Accumulator: Clone + Sync + Send + Into<Vec<u8>>,
     Share: TryInto<Vec<P::Accumulator>>,
     <Share as TryInto<Vec<P::Accumulator>>>::Error: Debug,
 {
@@ -119,6 +121,8 @@ where
             self.expected_window,
             self.expected_round,
         )?;
+
+        self.remote.validate_aggregate(&request)?;
 
         let group: usize = request
             .group
@@ -165,10 +169,10 @@ where
             // in seed-homomorphic case this is expensive, so it needs to happen
             // before we call remote.done(). we log the length so the into()
             // call won't get optimized away!
-            let result: Vec<Bytes> = result.into_iter().map(Into::into).collect();
+            let result: Vec<Vec<u8>> = result.into_iter().map(Into::into).collect();
             info!("Publisher finished!");
             trace!("Recovered value len: {:?}", result.len());
-            remote.done().await;
+            remote.done(result).await;
         });
 
         Ok(Response::new(AggregateGroupResponse {}))
@@ -191,7 +195,7 @@ where
     R: Remote + 'static,
     F: Future<Output = ()> + Send + 'static,
     P: Protocol + 'static,
-    P::Accumulator: Clone + Sync + Send + Into<Bytes>,
+    P::Accumulator: Clone + Sync + Send + Into<Vec<u8>>,
     Share: TryInto<Vec<P::Accumulator>>,
     <Share as TryInto<Vec<P::Accumulator>>>::Error: Debug,
 {
@@ -199,15 +203,18 @@ where
         MyPublisher::from_protocol(protocol, expected_window, expected_round, remote.clone());
     info!("Publisher starting up.");
     let local_socket_addr = net.local_socket_addr();
-    let server_task = tokio::spawn(async move {
-        tonic::transport::server::Server::builder()
-            .add_service(HealthServer::new(AllGoodHealthServer::default()))
-            .add_service(PublisherServer::new(state))
-            .serve_with_shutdown(local_socket_addr, shutdown)
-            .await
-    });
+    let mut builder = tonic::transport::server::Server::builder();
+    if let Some(tls) = net.server_tls_config() {
+        info!("Adding mTLS config.");
+        builder = builder.tls_config(tls)?;
+    }
+    let server = builder
+        .add_service(HealthServer::new(AllGoodHealthServer::default()))
+        .add_service(PublisherServer::new(state))
+        .serve_with_shutdown(local_socket_addr, shutdown);
+    let server_task = tokio::spawn(server);
 
-    wait_for_health(format!("http://{}", net.public_addr()), None).await?;
+    wait_for_health(net.public_addr(), net.tls_config()).await?;
     trace!("Publisher {:?} healthy and serving.", info);
 
     let node = Node::new(info.into(), net.public_addr());
@@ -326,6 +333,87 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spectrum_primitives::Bytes;
+    use tokio::sync::Notify;
+
+    #[derive(Clone)]
+    struct TestProtocol;
+
+    impl Protocol for TestProtocol {
+        type ChannelKey = ();
+        type WriteToken = ();
+        type AuditShare = ();
+        type Accumulator = Bytes;
+
+        fn num_parties(&self) -> usize {
+            2
+        }
+        fn num_channels(&self) -> usize {
+            1
+        }
+        fn message_len(&self) -> usize {
+            3
+        }
+        fn broadcast(&self, _: Bytes, _: usize, _: ()) -> Vec<()> {
+            unreachable!()
+        }
+        fn cover(&self) -> Vec<()> {
+            unreachable!()
+        }
+        fn gen_audit(&self, _: &[()], _: ()) -> Vec<()> {
+            unreachable!()
+        }
+        fn check_audit(&self, _: Vec<()>) -> bool {
+            unreachable!()
+        }
+        fn new_accumulator(&self) -> Vec<Bytes> {
+            vec![Bytes::empty(self.message_len())]
+        }
+        fn to_accumulator(&self, _: ()) -> Vec<Bytes> {
+            unreachable!()
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingRemote {
+        result: Arc<Mutex<Option<Vec<Vec<u8>>>>>,
+        completed: Arc<Notify>,
+    }
+
+    #[tonic::async_trait]
+    impl Remote for CapturingRemote {
+        async fn start(&self) {}
+        async fn done(&self, result: Vec<Vec<u8>>) {
+            *self.result.lock().await = Some(result);
+            self.completed.notify_one();
+        }
+    }
+
+    #[derive(Clone)]
+    struct RejectingRemote;
+
+    #[tonic::async_trait]
+    impl Remote for RejectingRemote {
+        async fn start(&self) {}
+        fn validate_aggregate(&self, _: &AggregateGroupRequest) -> Result<(), Status> {
+            Err(Status::unauthenticated("rejected by test verifier"))
+        }
+        async fn done(&self, _: Vec<Vec<u8>>) {
+            unreachable!()
+        }
+    }
+
+    fn aggregate(group: u32, data: Vec<u8>) -> Request<AggregateGroupRequest> {
+        Request::new(AggregateGroupRequest {
+            share: Some(Share { data: vec![data] }),
+            group,
+            window: 7,
+            round: 2,
+            version: 0,
+            configuration_hash: Vec::new(),
+            signature: Vec::new(),
+        })
+    }
 
     #[test]
     fn groups_can_only_be_recorded_once() {
@@ -339,5 +427,33 @@ mod tests {
 
         let unknown = record_group(&mut received_groups, 2, 2).unwrap_err();
         assert_eq!(unknown.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn reconstructed_channels_are_delivered_to_the_remote() {
+        let remote = CapturingRemote::default();
+        let publisher = MyPublisher::from_protocol(TestProtocol, 7, 2, remote.clone());
+        publisher
+            .aggregate_group(aggregate(0, vec![1, 2, 3]))
+            .await
+            .unwrap();
+        publisher
+            .aggregate_group(aggregate(1, vec![4, 5, 6]))
+            .await
+            .unwrap();
+        remote.completed.notified().await;
+        assert_eq!(*remote.result.lock().await, Some(vec![vec![5, 7, 5]]));
+    }
+
+    #[tokio::test]
+    async fn rejected_aggregate_does_not_change_publisher_state() {
+        let publisher = MyPublisher::from_protocol(TestProtocol, 7, 2, RejectingRemote);
+        let error = publisher
+            .aggregate_group(aggregate(0, vec![1, 2, 3]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
+        assert!(publisher.received_groups.lock().await.is_empty());
+        assert_eq!(publisher.accumulator.get().await, vec![Bytes::empty(3)]);
     }
 }

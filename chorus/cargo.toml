@@ -5,7 +5,15 @@ edition = "2021"
 publish = false
 
 [dependencies]
+ark-bls12-381 = "0.4"
+ark-ec = "0.4"
+ark-ff = "0.4"
+ark-serialize = "0.4"
+ark-std = "0.4"
+bbs_plus = { version = "0.25", default-features = false, features = ["std"] }
+blake2 = "0.10"
 clap = { version = "3.0.0-beta.5", features = ["derive", "env", "cargo"] }
+dock_crypto_utils = { version = "0.23", default-features = false, features = ["std"] }
 spectrum = { path = "../spectrum" }
 tokio = {
     version = "1.1.0",
@@ -13,3 +21,11 @@ tokio = {
 }
 tonic = "0.4"
 ed25519-dalek = "3"
+blake3 = "0.3.7"
+idna = "1.1"
+percent-encoding = "2.3"
+rand = "0.8"
+schnorr_pok = { version = "0.23", default-features = false, features = ["std"] }
+serde_json = "1.0"
+sha2 = "0.10"
+url = "2.5"
